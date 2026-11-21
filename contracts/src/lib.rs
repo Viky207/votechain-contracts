@@ -9,6 +9,13 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, String, Sy
 /// Maximum allowed length (in bytes) for a vote's `comment_hash`.
 pub const MAX_COMMENT_HASH_LEN: u32 = 64;
 
+/// Maximum number of voters that can be read in a single `get_votes` batch.
+///
+/// Each entry in a batch costs one persistent storage read, so the per-call
+/// cost scales linearly with the batch size. Requests above this cap are
+/// rejected with `BatchTooLarge` to bound the per-call gas cost.
+pub const MAX_BATCH_VOTERS: u32 = 50;
+
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Proposal {
@@ -154,6 +161,28 @@ impl VotingContract {
             .expect("vote not found")
     }
 
+    /// Fetch vote records for a batch of voters on a given proposal.
+    ///
+    /// The batch is capped at [`MAX_BATCH_VOTERS`] entries; larger requests
+    /// panic with `BatchTooLarge`. Each entry costs one persistent storage
+    /// read, so the per-call cost scales linearly with the batch size.
+    pub fn get_votes(env: Env, proposal_id: u64, voters: Vec<Address>) -> Vec<VoteRecord> {
+        if voters.len() > MAX_BATCH_VOTERS {
+            panic!("BatchTooLarge");
+        }
+
+        let mut records = Vec::new(&env);
+        for voter in voters.iter() {
+            let record: VoteRecord = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Vote(proposal_id, voter))
+                .expect("vote not found");
+            records.push_back(record);
+        }
+        records
+    }
+
     /// List all proposals.
     pub fn list_proposals(env: Env) -> Vec<Proposal> {
         let count: u64 = env
@@ -251,5 +280,47 @@ mod test {
         assert_eq!(hash.len(), MAX_COMMENT_HASH_LEN + 1);
 
         client.cast_vote(&voter, &proposal_id, &true, &Some(hash));
+    }
+
+    #[test]
+    fn get_votes_accepts_exact_max_batch() {
+        let (env, client, _creator, proposal_id) = setup();
+
+        let mut voters = Vec::new(&env);
+        let mut i: u32 = 0;
+        while i < MAX_BATCH_VOTERS {
+            let voter = Address::generate(&env);
+            client.cast_vote(&voter, &proposal_id, &true, &None);
+            voters.push_back(voter);
+            i += 1;
+        }
+        assert_eq!(voters.len(), MAX_BATCH_VOTERS);
+
+        let records = client.get_votes(&proposal_id, &voters);
+        assert_eq!(records.len(), MAX_BATCH_VOTERS);
+        for (idx, record) in records.iter().enumerate() {
+            assert_eq!(record.voter, voters.get(idx as u32).unwrap());
+            assert_eq!(record.proposal_id, proposal_id);
+            assert!(record.support);
+            assert_eq!(record.comment_hash, None);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "BatchTooLarge")]
+    fn get_votes_rejects_batch_over_max() {
+        let (env, client, _creator, proposal_id) = setup();
+
+        let mut voters = Vec::new(&env);
+        let mut i: u32 = 0;
+        while i < MAX_BATCH_VOTERS + 1 {
+            let voter = Address::generate(&env);
+            client.cast_vote(&voter, &proposal_id, &true, &None);
+            voters.push_back(voter);
+            i += 1;
+        }
+        assert_eq!(voters.len(), MAX_BATCH_VOTERS + 1);
+
+        client.get_votes(&proposal_id, &voters);
     }
 }
