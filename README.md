@@ -1700,3 +1700,8 @@ git push origin feature/your-task-name
 • Open a Pull Request.
 
 Built with ❤️ on Stellar
+
+## Handsoff notes
+
+<!-- handsoff-issue-575 -->
+- #575: [Contracts] Add a contract version getter and bump policy doc
